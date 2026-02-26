@@ -1,0 +1,400 @@
+---
+output: html_document
+date: "2025-04-29"
+---
+
+# Unbiased Relative Difference Analysis of the Interim and Legacy Primary Productivity Products
+
+> Update: April 2025
+
+## Objectives
+
+Calculate the mean unbiased relative difference $\psi^{\text{netPP}}$ of the interim VIIRS netPP ($\text{netPP}_{\text{VIIRS}}$) and legacy MODIS netPP ($\text{netPP}_{\text{MODIS}}$) products within a user-specified region for each month from the timeseries of the user-specified sensor.
+
+We are using this statistic to track the similarities in netPP values between interim VIIRS and legacy MODIS datasets to provide validation that the interim netPP products can be reliably used for continuity in long-term productivity analyses.
+
+For **VIIRS-SNPP**, the result will be a **120-month (10-year)** mean monthly timeseries of $\psi^{\text{netPP}}$ within your area of interest.
+
+For **VIIRS-NOAA20**, the result will be a **60-month (5-year)** mean monthly timeseries of $\psi^{\text{netPP}}$ within your area of interest.
+
+The unbiased relative difference $\psi^{\text{netPP}}$ is calculated for each pixel as follows:
+
+$$
+\psi^{\text{netPP}} = \frac{\text{netPP}_{\text{VIIRS}} - \text{netPP}_{\text{MODIS}}}{\left( \text{netPP}_{\text{VIIRS}} + \text{netPP}_{\text{MODIS}} \right) \div 2}
+$$
+
+Where:
+
+-   The difference between VIIRS-based netPP ($\text{netPP}_{\text{VIIRS}}$) and MODIS-based netPP ($\text{netPP}_{\text{MODIS}}$) values for that pixel is divided by the mean of $\text{netPP}_{\text{VIIRS}}$ and $\text{netPP}_{\text{MODIS}}$.
+
+Normalizing by the mean of the two values avoids arbitrarily selecting one product as a reference.
+
+------------------------------------------------------------------------
+
+## Datasets Overview
+
+We created the pixel-by-pixel unbiased relative difference $\psi^{\text{netPP}}$ for the globe for each month at a **9km resolution** across two datasets.
+
+1.  **Unbiased Relative Difference of Net Primary Productivity, VIIRS SNPP vs MODIS Aqua, 9Km, Monthly, 2013-2022, Global**
+
+-   Distributed via the West Coast Node ERDDAP dataset at the following link: <https://coastwatch.pfeg.noaa.gov/wcn/erddap/griddap/netpp_psi_snpp_modis.graph>
+
+2.  **Unbiased Relative Difference of Net Primary Productivity, VIIRS NOAA20 vs MODIS Aqua, 9Km, Monthly, 2018-2022, Global**
+
+-   Distributed via the West Coast Node ERDDAP dataset at the following link: <https://coastwatch.pfeg.noaa.gov/wcn/erddap/griddap/netpp_psi_noaa20_modis.graph>
+
+## Steps:
+
+> -   Download an area of monthly $\psi^{\text{netPP}}$ values from the ERDDAP server for each month from the timeseries.
+> -   Mask the timeseries so that only data within a shapefile is retained.
+> -   Calculate the mean values of $\psi^{\text{netPP}}$ for each month.
+> -   Visualize the timeseries and save the data.
+> -   Visualize the spatial variability in the timeseries monthly $\psi^{\text{lat/lon}}$ mean.
+
+## Shapefiles
+
+#### Longhurst Marine Provinces
+
+The dataset represents the division of the world oceans into provinces as defined by Longhurst (1995; 1998; 2006). This division has been based on the prevailing role of physical forcing as a regulator of phytoplankton distribution. The Longhurst Marine Provinces dataset is available online (<https://www.marineregions.org/downloads.php>) and within the shapes folder associated with this repository.
+
+![](images/longhurst.png)
+
+**For our example we will use the shapefile for the "California Upwelling Coastal Province" (ProvCode: CCAL) within the Longhurst Marine Provinces classification**.
+
+## Resource requirements
+
+-   **R Studio** with the modules included within the *Install and Load Required Packages* section below
+
+-   **Shapefile** of your area of interest
+
+    -   If you don't have shapefile, we will include some workarounds in the notebook.
+
+-   **Internet connection**
+
+## Tutorial for this notebook
+
+For this tutorial, we will be using the **VIIRS-SNPP - MODIS-Aqua** dataset to generate a timeseries of monthly mean values of $\psi^{\text{netPP}}$.
+
+## Install and Load Required Packages
+
+```{r}
+pkges = installed.packages()[,"Package"]
+# Function to check if pkgs are installed, install missing pkgs, and load
+pkgTest <- function(x)
+{
+  if (!require(x,character.only = TRUE))
+  {
+    install.packages(x,dep=TRUE,repos='http://cran.us.r-project.org')
+    if(!require(x,character.only = TRUE)) stop(x, " :Package not found")
+  }
+}
+
+# create list of required packages
+list.of.packages <- c("ncdf4", "rerddap","plotdap", "parsedate", 
+                      "sp", "ggplot2", "RColorBrewer", "sf", 
+                      "reshape2", "maps", "mapdata", 
+                      "jsonlite", "rerddapXtracto", "dplyr",
+                      "lubridate")
+
+# Run install and load function
+for (pk in list.of.packages) {
+  pkgTest(pk)
+}
+
+# create list of installed packages
+pkges = installed.packages()[,"Package"]
+```
+
+### Define Extraction Method: Bounding Box or Longhurst Province
+
+For this tutorial, we are setting **use_bbox = FALSE** because we will be looking at the CCAL province. If you do not have the Longhurst Province shapefiles, set **use_bbox = TRUE** and manually define the bounding box of interest.
+
+```{r}
+# User option: Set TRUE for bounding box, FALSE for Longhurst Province
+use_bbox <- FALSE
+
+# Path to shapefile
+shapefile_path <- "/Users/madisonrichardson/netpp/resources/Longhurst/Longhurst_world_v4_2010.shp"
+
+# Read shapefile
+shapes <- read_sf(dsn = shapefile_path, layer = "Longhurst_world_v4_2010")
+
+# Example List of all the province names
+shapes$ProvCode
+
+if (!use_bbox) {
+  # Set Province Code
+  ProvCode <- "CCAL"
+  
+  # Extract the province region
+  selected_region <- shapes[shapes$ProvCode == ProvCode,]
+  
+  # Get bounding box of the province
+  bbox <- st_bbox(selected_region)
+  lon_min <- bbox["xmin"]
+  lon_max <- bbox["xmax"]
+  lat_min <- bbox["ymin"]
+  lat_max <- bbox["ymax"]
+  
+  # Extract longitude & latitude for polygon
+  longitude <- st_coordinates(selected_region)[,1]
+  latitude  <- st_coordinates(selected_region)[,2]
+  
+} else {
+  # Manually set bounding box
+  lon_min <- -128.0
+  lon_max <- -124.0
+  lat_min <-  42.0
+  lat_max <-  46.0
+  
+  longitude <- c(lon_min, lon_max, lon_max, lon_min, lon_min)
+  latitude  <- c(lat_min, lat_min, lat_max, lat_max, lat_min)
+}
+
+# Print bounding box
+print(paste("Bounding Box:", lon_min, lon_max, lat_min, lat_max))
+
+#[1] "BPLR" "ARCT" "SARC" "NADR" "GFST" "NASW" "NATR" "WTRA" "ETRA" "SATL" "NECS" "CNRY" "GUIN" "GUIA" "NWCS" #"MEDI" "CARB"
+#[18] "NASE" "BRAZ" "FKLD" "BENG" "MONS" "ISSG" "EAFR" "REDS" "ARAB" "INDE" "INDW" "AUSW" "BERS" "PSAE" "PSAW" #"KURO" "NPPF"
+#[35] "NPSW" "TASM" "SPSG" "NPTG" "PNEC" "PEQD" "WARM" "ARCH" "ALSK" "CCAL" "CAMR" "CHIL" "CHIN" "SUND" "AUSE" #"NEWZ" "SSTC"
+#[52] "SANT" "ANTA" "APLR"
+#[1] "Bounding Box: -134.5 -110.5 16.5000000000001 51.3834311020021"
+
+```
+
+## Select Satellite Dataset from ERDDAP
+
+We will be using the VIIRS-SNPP - MODIS-AQUA psi dataset from the West Coast Node ERDDAP Server. The dataset ID is: **netpp_psi_snpp_modis**. We will use the info function from the **rerddap** package to first obtain information about the dataset of interest, then we will import the data.
+
+```{r}
+# Set ERDDAP URL
+erddap_url = "https://coastwatch.pfeg.noaa.gov/wcn/erddap/"
+
+# Get dataset info
+dataInfo <- rerddap::info('netpp_psi_snpp_modis', url=erddap_url)  
+print(dataInfo)
+
+#<ERDDAP info> netpp_psi_snpp_modis 
+#Base URL: https://coastwatch.pfeg.noaa.gov/wcn/erddap 
+#Dataset Type: griddap 
+#Dimensions (range):  
+#    time: (2013-01-16T08:00:00Z, 2022-12-16T08:00:00Z) 
+#   latitude: (-89.95834, 89.95834) 
+#    longitude: (-179.9583, 179.9583) 
+#Variables:  
+#    psi: 
+#        Units: 1 
+
+```
+## Extract Data from ERDDAP
+
+Using the **rxtracto_3D function** for the bounding box, we will import the satellite data from erddap.
+
+Using the **rxtractogon function** for the province, we will import the satellite data from erddap. The rxtractogon function takes the variable(s) of interest and the coordinates as input. The rxtractogon function automatically extracts data from the satellite dataset and masks out any data outside the polygon boundary.
+
+The parameter we extract from the dataset is called psi.
+
+We are setting psi_time to the entire time period shown from the dataInfo above.
+
+Above, we set our xcoords (longitude) and ycoords (latitude) so we will use those ranges here.
+
+```{r}
+# Define parameter and time range
+parameter <- 'psi'
+psi_time <- c("2013-01-16T08:00:00Z", "2022-12-16T08:00:00Z")
+
+# Extract **full bounding box data**
+bbox_data <- rxtracto_3D(
+  dataInfo,
+  parameter = parameter,
+  xcoord = c(lon_min, lon_max),
+  ycoord = c(lat_min, lat_max),
+  tcoord = psi_time
+)
+#List the returned data
+str(bbox_data)
+
+# Extract **province-masked data**
+prov_data <- rxtractogon(
+  dataInfo,
+  parameter = parameter,
+  xcoord = longitude,
+  ycoord = latitude,
+  tcoord = psi_time
+)
+#List the returned data
+str(prov_data)
+
+#List of 6
+#$ psi        : num [1:289, 1:419, 1:120] 0.057 0.0371 -0.0587 0.0259 0.0323 ...
+#$ datasetname: chr "netpp_psi_snpp_modis"
+#$ longitude  : num [1:289(1d)] -134 -134 -134 -134 -134 ...
+#$ latitude   : num [1:419(1d)] 16.5 16.6 16.7 16.8 16.9 ...
+#$ altitude   : logi NA
+#$ time       : POSIXlt[1:120], format: "2013-01-16 08:00:00" "2013-02-16 08:00:00" "2013-03-16 07:00:00" #"2013-04-16 07:00:00" ...
+#- attr(*, "class")= chr [1:2] "list" "rxtracto3D"
+#- attr(*, "base_url")= chr "https://coastwatch.pfeg.noaa.gov/wcn/erddap/"
+#- attr(*, "datasetid")= chr "netpp_psi_snpp_modis"
+#List of 6
+#$ psi        : num [1:289, 1:419, 1:120] NA NA NA NA NA NA NA NA NA NA ...
+#$ datasetname: chr "netpp_psi_snpp_modis"
+#$ longitude  : num [1:289(1d)] -134 -134 -134 -134 -134 ...
+#$ latitude   : num [1:419(1d)] 16.5 16.6 16.7 16.8 16.9 ...
+#$ altitude   : logi NA
+#$ time       : POSIXlt[1:120], format: "2013-01-16 08:00:00" "2013-02-16 08:00:00" "2013-03-16 07:00:00" #"2013-04-16 07:00:00" ...
+#- attr(*, "class")= chr [1:2] "list" "rxtracto3D"
+#- attr(*, "base_url")= chr "https://coastwatch.pfeg.noaa.gov/wcn/erddap/"
+#- attr(*, "datasetid")= chr "netpp_psi_snpp_modis"
+
+```
+
+## Transforming Psi Data for Timeseries Visualization
+After extracting psi data from ERDDAP, we need to convert it into a structured format for analysis. This involves reshaping the data and converting time formats.
+
+```{r}
+# Convert 'psi' array into a long-format data frame
+prov_df <- expand.grid(
+  lon = prov_data$longitude,
+  lat = prov_data$latitude,
+  time = prov_data$time
+  )
+
+# Flatten the 'psi' array into a vector
+prov_df$psi <- as.vector(prov_data$psi)
+
+# Convert time to Date format
+prov_df$time <- as.Date(prov_df$time)
+
+```
+
+## Calculate the Monthly Mean for Each Month to Create a Timeseries
+
+For each month of the timeseries (120-month for SNPP or 60-month for NOAA20) generate the mean $\psi^{\text{netPP}}$.
+
+```{r}
+# Compute monthly mean
+monthly_data <- prov_df %>%
+  mutate(year = year(time), month = month(time, label = TRUE)) %>%
+  group_by(year, month) %>%
+  summarise(monthly_mean = mean(psi, na.rm = TRUE), .groups = "drop")
+
+# Convert month from factor (if needed) to numeric format
+monthly_data$month <- match(monthly_data$month, month.abb)
+
+# Create proper date column for plotting
+monthly_data$date <- as.Date(paste(monthly_data$year, monthly_data$month, "01", sep="-"))
+
+```
+
+## Plot the Timeseries
+
+```{r}
+ggplot(monthly_data, aes(x = date, y = monthly_mean)) +
+  geom_point(color = "black", size = 2) +   # Scatter points
+  geom_line(color = "black", linewidth = 1) +  # Line plot
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "red") +  # +5% threshold
+  geom_hline(yintercept = -0.05, linetype = "dashed", color = "blue") + # -5% threshold
+  labs(
+    title = expression(bar(psi)[month] * " Timeseries: Unbiased Relative Difference MODIS - SNPP (CCAL)"),
+    x = "Year",
+    y = "Unbiased Relative Difference (Psi)"
+  ) +
+  ylim(-0.1, 0.1) + 
+  theme_minimal()
+
+```
+
+![](images/longhurst_psi_timeseries.png)
+
+### Results
+
+-   Mean $\psi^{\text{netPP}}$ values in general were between 0 and 0.05 over most of the timeseries, meaning $\text{netPP}_{\text{VIIRS}}$) was 0 to +5% greater than the mean value for both datasets.
+
+-   Mean $\psi^{\text{netPP}}$ showed greater variability from 2022-2023.
+
+## Compute the 10-Year Monthly Mean for Spatial Visualization
+
+```{r}
+# Compute 10-year mean for the full bounding box data
+bbox_data$psi <- apply(bbox_data$psi, c(1, 2), mean, na.rm = TRUE)
+
+# Compute 10-year mean for CCAL region
+ten_year_spatial_data <- prov_data  
+ten_year_spatial_data$psi <- apply(prov_data$psi, c(1, 2), mean, na.rm = TRUE)
+
+```
+
+## Format the Data for plotBBox()
+
+We are assigning the dummy variable "time" because plotBBox() expects a time variable in the dataset, even though we are visualizing a 10-year mean (which has no time dimension).
+
+We manually set the class of bbox_data to "rxtracto3D" because plotBBox() expects input data to be either "rxtracto3D" or "rxtractogon".
+
+```{r}
+# Format bbox_data for plotBBox
+bbox_data$time <- as.POSIXlt("2013-01-01", tz = "UTC")  
+class(bbox_data) <- "rxtracto3D"
+
+# Format ten_year_spatial_data for plotBBox
+ten_year_spatial_data$time <- as.POSIXlt("2013-01-01", tz = "UTC")  
+class(ten_year_spatial_data) <- "rxtracto3D"
+
+```
+
+## Normalize Data Range for Visualization
+
+Normalize psi values for better visualization.
+
+```{r}
+# Set minimum and maximum values
+bbox_data$psi[bbox_data$psi < -0.2] <- -0.2
+bbox_data$psi[bbox_data$psi > 0.2] <- 0.2
+ten_year_spatial_data$psi[ten_year_spatial_data$psi < -0.2] <- -0.2
+ten_year_spatial_data$psi[ten_year_spatial_data$psi > 0.2] <- 0.2
+```
+
+## Visualize the Spatial Variability in the 10-year monthly ψ mean for VIIRS-SNPP - MODIS-AQUA
+
+Use the **plotBBox function** in the **rerddapXtracto** package to plot the data. The maps shows the full coverage of the bounding box and the masked area set by the shapefile for CCAL.
+
+```{r}
+# Define custom color palette
+custom_colors <- colorRampPalette(c("black",
+                                    "blue",
+                                    "cyan",
+                                    "green",
+                                    "yellow",
+                                    "orange",
+                                    "red",
+                                    "purple",
+                                    "white"))(10)
+
+
+# Plot the full bounding box
+plotBBox(bbox_data,
+         plotColor = custom_colors,
+         maxpixels = 1000000,
+         name = 'Unbiased Relative Difference (lat/lon)'
+)
+
+```
+
+![](images/longhurst_psi_unmasked.png)
+
+```{r}
+# Plot the masked province
+plotBBox(ten_year_spatial_data,
+         plotColor = custom_colors,
+         maxpixels = 1000000,
+         name = 'Unbiased Relative Difference (lat/lon)'
+)
+
+```
+
+![](images/longhurst_psi_masked.png)
+
+### Results
+
+-   Most of the region is positive, meaning VIIRS-SNPP values \> MODIS-Aqua values.
+
+-   The spots of higher difference are shown along the coastline where upwelling occurs.

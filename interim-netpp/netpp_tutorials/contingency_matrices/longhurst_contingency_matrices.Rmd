@@ -1,0 +1,485 @@
+---
+title: "Contingency Tables: Assessing the Similarity Between Two Primary Productivity (NetPP) Products"
+output: html_document
+date: "2025-09-12"
+---
+
+## Objectives
+
+In this tutorial, we will construct and analyze contingency matrices that compare trends from the legacy primary productivity product, MODIS-Aqua, and an interim product, VIIRS-SNPP or VIIRS-NOAA20.
+
+We have already calculated the long-term linear trend for NetPP using linear regression analysis. Key details of the analysis include:
+
+-   **Pixel-by-Pixel Analysis:** Linear regression was applied over time to each pixel for both legacy and interim NetPP products.
+
+-   **Output Results:** Pixel-by-pixel values were produced for:
+
+    -   The slope of the linear trend.
+
+    -   The number of observations used to calculate the trend (n).
+
+    -   The p-values for statistical significance.
+
+    -   Only pixels with a time series containing 50% of the maximum n-values were included in the analysis.
+
+For this tutorial, we will be comparing MODIS-AQUA and VIIRS-SNPP.
+
+### Constructing a Contingency Matrix
+
+Using the results of the regression analysis, a contingency matrix is constructed to compare the trends between the legacy and interim product. Pixels are categorized by the matrix into three groups based on the sign of the slope:
+
+1.  **Positive Trend:** Increasing trend (positive slope).
+
+2.  **Negative Trend:** Decreasing trend (negative slope).
+
+3.  **No significant Trend:** Slope not significantly different than zero.
+
+The contingency matrix shows the percentage of a pixels where the two NetPP products agree or disagree on the sign of the slope.
+
+### Quantifying Agreement with Cohen's Kappa
+
+The contingency matrix is used to compute Cohen's Kappa, a statistical measure that quantifies the level of agreement between the two NetPP products. Cohen's Kappa accounts for the agreement occurring by chance and provides a standardized metric of similarity.
+
+## Datasets Overview
+
+1.  **Temporal Trends, Primary Productivity, VIIRS S-NPP, MODIS Aqua, Global, 9km, 2013 to 2022**
+
+-   Distributed via the West Coast Node ERDDAP dataset at the following link: <https://coastwatch.pfeg.noaa.gov/wcn/erddap/griddap/netpp_trends_viirssnpp_and_modisaqua.graph>
+
+2.  **Temporal Trends, Primary Productivity, VIIRS NOAA-20, MODIS Aqua, Global, 9km,
+2018 to 2022**
+
+-   Distributed via the West Coast Node ERDDAP dataset at the following link: <https://coastwatch.pfeg.noaa.gov/wcn/erddap/griddap/netpp_trends_viirsnoaa20_and_modisaqua.graph>
+
+## Shapefiles
+
+#### Longhurst Marine Provinces
+
+The dataset represents the division of the world oceans into provinces as defined by Longhurst (1995; 1998; 2006). This division has been based on the prevailing role of physical forcing as a regulator of phytoplankton distribution. The Longhurst Marine Provinces dataset is available online (<https://www.marineregions.org/downloads.php>) and within the shapes folder associated with this repository.
+
+![](images/longhurst.png)
+
+**For our example we will use the shapefile for the "California Upwelling Coastal Province" (ProvCode: CCAL) within the Longhurst Marine Provinces classification**.
+
+## Resource requirements
+
+-   **R Studio** with the modules included within the *Install and Load Required Packages* section below
+
+-   **Shapefile** of your area of interest
+
+    -   If you don't have shapefile, we will include some workarounds in the notebook.
+
+-   **Internet connection**
+
+## Install and Load Required Packages
+
+```{r setup, message=FALSE, warning=FALSE}
+pkges = installed.packages()[,"Package"]
+# Function to check if pkgs are installed, install missing pkgs, and load
+pkgTest <- function(x)
+{
+  if (!require(x,character.only = TRUE))
+  {
+    install.packages(x,dep=TRUE,repos='http://cran.us.r-project.org')
+    if(!require(x,character.only = TRUE)) stop(x, " :Package not found")
+  }
+}
+
+# create list of required packages
+list.of.packages <- c("ncdf4", "rerddap","plotdap", "parsedate", 
+                      "sp", "ggplot2", "RColorBrewer", "sf", 
+                      "reshape2", "maps", "mapdata", 
+                      "jsonlite", "rerddapXtracto", "dplyr",
+                      "lubridate", "tidyr", "psych", "gridExtra",
+                      "grid")
+
+# Run install and load function
+for (pk in list.of.packages) {
+  pkgTest(pk)
+}
+
+# create list of installed packages
+pkges = installed.packages()[,"Package"]
+
+
+```
+
+## Make Useful Functions
+```{r}
+#' Find common (non-NA) grid points between MODIS and VIIRS fields
+#'
+#' This function identifies grid cells where both MODIS and VIIRS
+#' beta and p-value fields are not NA, and returns the paired values
+#' plus the number of common points.
+#'
+#' @param modis_beta  Numeric matrix/array of MODIS beta values.
+#' @param viirs_beta Numeric matrix/array of VIIRS beta values.
+#' @param modis_pval  Numeric matrix/array of MODIS p-values.
+#' @param viirs_pval Numeric matrix/array of VIIRS p-values.
+#'
+#' @return A list with:
+#' \describe{
+#'   \item{beta_common}{List of two numeric vectors: MODIS and VIIRS beta at common points.}
+#'   \item{pval_common}{List of two numeric vectors: MODIS and VIIRS p-values at common points.}
+#'   \item{num_common}{Integer, number of grid points with non-NA values in both fields.}
+#' }
+#'
+find_common_points <- function(modis_beta, viirs_beta, modis_pval, viirs_pval) {
+  mask <- !is.na(modis_beta) & !is.na(viirs_beta)
+  beta_common <- list(modis_beta[mask], viirs_beta[mask])
+  pval_common <- list(modis_pval[mask], viirs_pval[mask])
+  num_common <- sum(mask)
+  return(list(beta_common = beta_common, pval_common = pval_common, num_common = num_common))
+}
+
+
+```
+
+```{r}
+#' Create a 2x2 contingency table of trend agreement
+#'
+#' This function builds a 2x2 contingency table showing the percentage of
+#' common grid points where MODIS and NOAA-20 (or SNPP) trends are non-negative
+#' (β >= 0) or negative (β < 0).
+#'
+#' @param beta_common List of two numeric vectors containing MODIS and
+#'   NOAA-20 beta values at common (non-NA) grid points, typically from
+#'   \code{find_common_points()}.
+#' @param num_common Integer giving the number of common grid points.
+#'
+#' @return A 2x2 matrix of percentages, with MODIS trend classes as rows
+#'   and NOAA-20 trend classes as columns.
+#'
+create_2x2_contingency_table <- function(beta_common, num_common) {
+  table <- matrix(0, 2, 2)
+  rownames(table) <- c("MODIS β >= 0", "MODIS β < 0")
+  colnames(table) <- c("NOAA-20 β >= 0", "NOAA-20 β < 0")
+  
+  table[1, 1] <- sum(beta_common[[1]] >= 0 & beta_common[[2]] >= 0) / num_common * 100
+  table[1, 2] <- sum(beta_common[[1]] >= 0 & beta_common[[2]] < 0) / num_common * 100
+  table[2, 1] <- sum(beta_common[[1]] < 0 & beta_common[[2]] >= 0) / num_common * 100
+  table[2, 2] <- sum(beta_common[[1]] < 0 & beta_common[[2]] < 0) / num_common * 100
+  
+  return(table)
+}
+
+```
+
+```{r}
+#' Create a 3x3 contingency table of trend/significance agreement
+#'
+#' This function builds a 3x3 contingency table showing the percentage of
+#' common grid points where MODIS and NOAA-20 (or SNPP) trends are classified as
+#' non-significant, significantly non-negative (β >= 0), or significantly
+#' negative (β < 0) based on a p-value threshold.
+#'
+#' @param beta_common List of two numeric vectors with MODIS and NOAA-20
+#'   beta values at common (non-NA) grid points.
+#' @param pval_common List of two numeric vectors with MODIS and NOAA-20
+#'   p-values at the same common grid points.
+#' @param num_common Integer giving the number of common grid points.
+#' @param alpha Numeric p-value threshold used to define significance
+#'   (default is 0.05).
+#'
+#' @return A 3x3 matrix of percentages, with MODIS classes as rows
+#'   (n.s., β >= 0, β < 0) and NOAA-20 classes as columns.
+#'
+create_3x3_contingency_table <- function(beta_common, pval_common, num_common, alpha = 0.05) {
+  table <- matrix(0, 3, 3)
+  rownames(table) <- c("MODIS n.s.", "MODIS β >= 0", "MODIS β < 0")
+  colnames(table) <- c("NOAA-20 n.s.", "NOAA-20 β >= 0", "NOAA-20 β < 0")
+  
+  ns_indices_1 <- which(pval_common[[1]] >= alpha)
+  ns_indices_2 <- which(pval_common[[2]] >= alpha)
+  
+  table[1, 1] <- sum(ns_indices_1 %in% ns_indices_2) / num_common * 100
+  table[2, 1] <- sum(ns_indices_1 %in% which(pval_common[[2]] < alpha & beta_common[[2]] >= 0)) / num_common * 100
+  table[3, 1] <- sum(ns_indices_1 %in% which(pval_common[[2]] < alpha & beta_common[[2]] < 0)) / num_common * 100
+  
+  table[1, 2] <- sum(ns_indices_2 %in% which(pval_common[[1]] < alpha & beta_common[[1]] >= 0)) / num_common * 100
+  table[1, 3] <- sum(ns_indices_2 %in% which(pval_common[[1]] < alpha & beta_common[[1]] < 0)) / num_common * 100
+  
+  sig_indices_1 <- which(pval_common[[1]] < alpha)
+  sig_indices_2 <- which(pval_common[[2]] < alpha)
+  common_indices_sig1 <- sig_indices_1[sig_indices_1 %in% sig_indices_2]
+  common_indices_sig2 <- sig_indices_2[sig_indices_2 %in% sig_indices_1]
+  
+  reshaped_data <- list(
+    beta_common[[1]][common_indices_sig1],
+    beta_common[[2]][common_indices_sig2]
+  )
+  
+  table[2, 2] <- sum(reshaped_data[[1]] >= 0 & reshaped_data[[2]] >= 0) / num_common * 100
+  table[2, 3] <- sum(reshaped_data[[1]] >= 0 & reshaped_data[[2]] < 0) / num_common * 100
+  table[3, 2] <- sum(reshaped_data[[1]] < 0 & reshaped_data[[2]] >= 0) / num_common * 100
+  table[3, 3] <- sum(reshaped_data[[1]] < 0 & reshaped_data[[2]] < 0) / num_common * 100
+  
+  return(table)
+}
+
+```
+
+```{r}
+#' Compute Cohen's Kappa from a contingency table
+#'
+#' This function calculates Cohen's Kappa statistic from a contingency
+#' table, returning the kappa value as a single number.
+#'
+#' @param contingency_table A matrix or table of observed agreement
+#'   counts or percentages between two classifiers.
+#'
+#' @return Numeric value of Cohen's Kappa.
+#'
+compute_kappa <- function(contingency_table) {
+  kappa_result <- cohen.kappa(contingency_table)$kappa
+  return(kappa_result)
+}
+
+```
+
+```{r}
+#' Plot a contingency table with Cohen's Kappa
+#'
+#' This function creates a heatmap-style plot of a contingency table and
+#' displays Cohen's Kappa as text below the plot.
+#'
+#' @param table A matrix or table of values (e.g., percentages) to plot.
+#' @param title Character string for the plot title.
+#' @param kappa_value Numeric value of Cohen's Kappa to display under the plot.
+#'
+#' @return A grob object combining the contingency table plot and the
+#'   Kappa annotation.
+#'
+plot_contingency_table <- function(table, title, kappa_value) {
+  df <- as.data.frame(as.table(table))
+  
+  # Create the contingency table plot
+  p <- ggplot(df, aes(Var1, Var2, fill = Freq)) +
+    geom_tile() +
+    geom_text(aes(label = round(Freq, 1)), color = "white", size = 6) +
+    scale_fill_gradient(low = "lightblue", high = "darkblue") +
+    labs(title = title, fill = "Percentage", x = "", y = "") +
+    theme_minimal()
+  
+  # Create a separate text grob for Kappa
+  kappa_text <- grid::textGrob(
+    label = paste("Cohen's Kappa:", round(kappa_value, 2)),
+    gp = grid::gpar(fontsize = 12, fontface = "bold")
+  )
+  
+  # Arrange the plot and Kappa text below
+  full_plot <- gridExtra::grid.arrange(p, kappa_text, ncol = 1, heights = c(4, 0.5))
+  
+  return(full_plot)
+}
+
+
+```
+
+### Define Extraction Method: Bounding Box or Longhurst Province
+
+For this tutorial, we are setting **use_bbox = FALSE** because we will be looking at the CCAL province. If you do not have the Longhurst Province shapefiles, set **use_bbox = TRUE** and manually define the bounding box of interest.
+
+```{r define-method, message=FALSE, warning=FALSE}
+# User option: Use bounding box or province-based extraction
+use_bbox <- FALSE  
+
+# Path to shapefile
+shapefile_path <- "/Users/madisonrichardson/netpp/resources/Longhurst/Longhurst_world_v4_2010.shp"
+
+# Read shapefile
+shapes <- read_sf(dsn = shapefile_path, layer = "Longhurst_world_v4_2010")
+
+# Example List of all the province names
+shapes$ProvCode
+
+if (!use_bbox) {
+  # Set Province Code
+  ProvCode <- "CCAL"
+  
+  # Extract the province region
+  selected_region <- shapes[shapes$ProvCode == ProvCode,]
+  
+  # Get bounding box of the province
+  bbox <- st_bbox(selected_region)
+  lon_min <- bbox["xmin"]
+  lon_max <- bbox["xmax"]
+  lat_min <- bbox["ymin"]
+  lat_max <- bbox["ymax"]
+  
+  # Extract longitude & latitude for polygon
+  longitude <- st_coordinates(selected_region)[,1]
+  latitude  <- st_coordinates(selected_region)[,2]
+  
+} else {
+  # Manually set bounding box
+  lon_min <- -128.0
+  lon_max <- -124.0
+  lat_min <-  42.0
+  lat_max <-  46.0
+  
+  longitude <- c(lon_min, lon_max, lon_max, lon_min, lon_min)
+  latitude  <- c(lat_min, lat_min, lat_max, lat_max, lat_min)
+}
+
+# Print bounding box
+print(paste("Bounding Box:", lon_min, lon_max, lat_min, lat_max))
+
+```
+
+## Select Satellite Dataset from ERDDAP
+
+We will be using one dataset that contains the MODIS-AQUA trends and VIIRS-NOAA20 trends distributed by the West Coast Node ERDDAP Server. The  dataset ID is: **netpp_trends_viirsnoaa20_and_modisaqua**. We will use the info function from the **rerddap** package to first obtain information about the dataset of interest, then we will import the data.
+
+```{r sat-data, message=FALSE, warning=FALSE}
+# Set ERDDAP URL
+erddap_url = "https://coastwatch.pfeg.noaa.gov/wcn/erddap"
+
+# Get dataset info
+dataInfo <- rerddap::info('netpp_trends_viirsnoaa20_and_modisaqua', url=erddap_url)
+print(dataInfo)
+
+```
+
+## Fetching Data from ERDDAP
+
+Using the function **griddap**, we fetch gridded data from an ERDDAP server
+
+```{r extract, message=FALSE, warning=FALSE}
+# Set ERDDAP datasets IDs
+dataset_ID <- "netpp_trends_viirsnoaa20_and_modisaqua"
+
+# Retrieve MODIS data
+modis_dataset <- griddap(
+    dataset_ID,
+    url = erddap_url,
+    latitude = c(lat_min, lat_max),
+    longitude = c(lon_min, lon_max),
+    fields = c("modis_beta", "modis_pval")
+)$data
+
+# Retrieve NOAA20 data
+noaa20_dataset <- griddap(
+    dataset_ID,
+    url = erddap_url,
+    latitude = c(lat_min, lat_max),
+    longitude = c(lon_min, lon_max),
+    fields = c("viirs_beta", "viirs_pval")
+)$data
+
+# View the data
+print(modis_dataset)
+print(noaa20_dataset)
+
+```
+
+## Extract Trends (beta) and Statistical Significance (pval)
+
+Each dataset contains gridded values for `beta` and `pval`, which are store in separate objects for further comparison.
+
+```{r beta-pval, message=FALSE, warning=FALSE}
+# Extract beta and pval from MODIS dataset
+modis_beta <- modis_dataset$modis_beta
+modis_pval <- modis_dataset$modis_pval
+
+# Extract beta and pval from NOAA-20 dataset
+noaa20_beta <- noaa20_dataset$viirs_beta
+noaa20_pval <- noaa20_dataset$viirs_pval
+
+```
+
+## Finding Common Grid Points for Comparison
+
+To compare trends between MODIS and NOAA-20 datasets, we need to identify grid points that have valid values in both datasets. The function `find_common_points` filters out missing (NA) values and extracts the corresponding `beta` and `pval` values from both datasets.
+
+```{r common-points, message=FALSE, warning=FALSE}
+# Compute common grid points
+common_data <- find_common_points(modis_beta, noaa20_beta, modis_pval, noaa20_pval)
+
+```
+
+## Creating a 2x2 Contingency Table
+
+The 2x2 contingency table categorizes and compares trend directions (β values) from the legacy (MODIS) and interim (SNPP) datasets at common grid points. The table categorizes pixels based on whether both datasets agree on the trend direction being either **positive** ($\beta>=0$) or **negative** ($\beta<0$).
+
+The function `create_2x2_contingency_table` constructs a 2x2 matrix that classifies each grid point based on positive or negative trends in each of the datasets, and computes the common grid points in each category.
+
+```{r 2x2, message=FALSE, warning=FALSE}
+# Create 2x2 contingency table
+contingency_table_2x2 <- create_2x2_contingency_table(common_data$beta_common, common_data$num_common)
+
+# Print 2x2 contingency table
+print(contingency_table_2x2)
+
+```
+
+## Creating a 3x3 Contingency Table
+
+The 3x3 contingency table categorizes and compares trend directions (β values) from the legacy (MODIS) and interim (NOAA-20) datasets at common grid points and incorporates statistical significance (p-values) comparing agreement in non-significant trends.
+
+The function `create_3x3_contingency_table` constructs a 3x3 matrix that categorizes each grid point based on trend significance and direction in each of the datasets and compute the percentage of common grid points in each category.
+
+```{r 3x3, message=FALSE, warning=FALSE}
+# Create 3x3 contingency table
+contingency_table_3x3 <- create_3x3_contingency_table(common_data$beta_common, common_data$pval_common, common_data$num_common)
+
+# Print 3x3 contingency table
+print(contingency_table_3x3)
+
+```
+
+## Computing Cohen's Kappa
+
+Cohen's Kappa quantifies the level of agreement between trend classifications in the MODIS and NOAA-20 dataset.
+
+Kappa values range from 0 to 1 where:
+
+-   1.0 = Perfect Agreement
+
+-   0.0 = No Agreement
+
+The function `compute_kappa` calculates Cohen's Kappa for both the 2x2 and 3x3 contingency tables.
+
+```{r kappa, message=FALSE, warning=FALSE}
+# Compute Cohen's Kappa for both contingency tables
+kappa_2x2 <- compute_kappa(contingency_table_2x2)
+kappa_3x3 <- compute_kappa(contingency_table_3x3)
+
+```
+
+## Visualizing Contingency Tables with Cohen's Kappa
+
+The function `plot_contingency_table` generates a contingency table with Cohen's Kappa displayed below the plot. The contingency table represents the percentage of grid points in each classification category, while Cohen's Kappa quantifies the agreement between the two datasets.
+
+## Plot 2x2 Contingency Table
+
+```{r 2x2_plot, message=FALSE, warning=FALSE}
+# Display and save 2x2 contingency table plot with Cohen's Kappa
+p_2x2 <- plot_contingency_table(contingency_table_2x2, "2x2 Contingency Table for CCAL", kappa_2x2)
+
+```
+
+### Results for the 2x2 Contingency Table
+
+- 70.1% of the grid points had a positive trend in both MODIS and NOAA-20.
+- 20.7% of the grid points had a negative trend in both MODIS and SNPP.
+- 4.4% of the grid points had a negative trend in NOAA-20 but a positive trend in MODIS.
+- 4.8% of the grid points had a negative trend in MODIS but a positive trend in NOAA-20
+- So, 90.8% of grid points show matching trend direction between MODIS and NOAA-20.
+- Cohen's Kappa = 0.76 indicating substantial agreement between MODIS and NOAA-20 datasets.
+
+## Plot 3x3 Contingency Table
+
+```{r 3x3_plot, message=FALSE, warning=FALSE}
+# Display and save 3x3 contingency table plot with Cohen's Kappa
+p_3x3 <- plot_contingency_table(contingency_table_3x3, "3x3 Contingency Table for CCAL", kappa_3x3)
+
+```
+
+### Results for the 3x3 Contingency Table
+
+- 54% of the grid points were non-significant in both MODIS and NOAA-20
+- 30.2% of the grid points had a significant positive trend in both datasets.
+- 2.1% of the grid points had a significant negative trend in both datasets.
+- So, 86.3% of grid points show matching trend direction between the sensors.
+- Cohen's Kappa = 0.73 indicating substantial agreement between MODIS and NOAA-20 datasets.
