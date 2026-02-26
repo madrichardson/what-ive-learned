@@ -1,0 +1,217 @@
+---
+title: "Visualizing Primary Productivity Correlations for the Legacy and Interim Products"
+output: html_document
+date: "2025-02-27"
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+## Overview
+
+In this tutorial, users will visualize correlations and p-values between two time series of monthly means of primary productivity described by Behrenfeld and Falkowski 1997.
+
+Finding the correlation coefficients and p-values between the legacy product, MODIS-AQUA, and interim products, VIIRS-SNPP and VIIRS-NOAA20, to evaluate the agreement in primary productivity measurement and validate the use of the interim products in long-term primary productivity analyses.
+
+## Datasets Overview
+
+1.  **Correlation Coefficients and P-values for Monthly Primary Productivity, MODIS-AQUA & VIIRS-SNPP, Science Quality, Global, 9km, 2013-2022**
+
+-   Distributed via the West Coast Node ERDDAP dataset at the following link: \> <http://localhost:8080/erddap/griddap/correlations_modis_snpp_monthly_9km.graph>
+
+2.  **Correlation Coefficients and P-values for Monthly Primary Productivity, MODIS-AQUA & VIIRS-NOAA20, Science Quality, Global, 9km, 2018-2022**
+
+-   Distributed via the West Coast Node ERDDAP dataset at the following link:\> <http://localhost:8080/erddap/griddap/correlations_modis_noaa20_monthly_9km.graph>
+
+3.  **Correlation Coefficients and P-values for Monthly Primary Productivity, VIIRS-SNPP & VIIRS-NOAA20, Science Quality, Global, 9km, 2018-2022**
+
+-   Distributed via the West Coast Node ERDDAP dataset at the following link:\> <http://localhost:8080/erddap/griddap/correlations_snpp_noaa20_monthly_9km.graph>
+
+## Steps
+
+1.  Extract data from an ERDDAP data server for a non-rectangular region or bounding box using the **rerddapXtracto** package.
+
+2.  Visualize the masked and unmasked correlations on a map.
+
+## Shapefiles
+
+#### Longhurst Marine Provinces
+
+The dataset represents the division of the world oceans into provinces as defined by Longhurst (1995; 1998; 2006).
+This division has been based on the prevailing role of physical forcing as a regulator of phytoplankton distribution.
+The Longhurst Marine Provinces dataset is available online (<https://www.marineregions.org/downloads.php>) and within the shapes folder associated with this repository.
+
+![Longhurst Provinces](longhurst.png) **For our example we will use the shapefile for the "California Upwelling Coastal Province" (ProvCode: CCAL) within the Longhurst Marine Provinces classification**.
+
+## Resource requirements
+
+-   **R Studio** with the modules included within the *Install and Load Required Packages* section below
+
+-   **Shapefile** of your area of interest
+
+    -   If you don't have shapefile, we will include some workarounds in the notebook.
+
+-   **Internet connection**
+
+## Install and Load Required Packages
+
+```{r setup, message=FALSE, warning=FALSE}
+pkges = installed.packages()[,"Package"]
+# Function to check if pkgs are installed, install missing pkgs, and load
+pkgTest <- function(x)
+{
+  if (!require(x,character.only = TRUE))
+  {
+    install.packages(x,dep=TRUE,repos='http://cran.us.r-project.org')
+    if(!require(x,character.only = TRUE)) stop(x, " :Package not found")
+  }
+}
+
+# create list of required packages
+list.of.packages <- c("ncdf4", "rerddap","plotdap", "parsedate", 
+                      "sp", "ggplot2", "RColorBrewer", "sf", 
+                      "reshape2", "maps", "mapdata", 
+                      "jsonlite", "rerddapXtracto")
+
+# Run install and load function
+for (pk in list.of.packages) {
+  pkgTest(pk)
+}
+
+# create list of installed packages
+pkges = installed.packages()[,"Package"]
+```
+
+### Define Extraction Method: Bounding Box or Longhurst Province
+
+For this tutorial, we are setting **use_bbox = FALSE** because we will be looking at the CCAL province.
+If you do not have the Longhurst Province shapefiles, set **use_bbox = TRUE** and manually define the bounding box of interest.
+
+```{r define-method, message=FALSE, warning=FALSE}
+# User option: Use bounding box or province-based extraction
+use_bbox <- FALSE  
+
+# Path to shapefile
+shapefile_path <- "/Users/madisonrichardson/netpp/resources/Longhurst/Longhurst_world_v4_2010.shp"
+
+# Read shapefile
+shapes <- read_sf(dsn = shapefile_path, layer = "Longhurst_world_v4_2010")
+
+if (!use_bbox) {
+  # Set Province Code
+  ProvCode <- "CCAL"
+  
+  # Extract the province region
+  selected_region <- shapes[shapes$ProvCode == ProvCode,]
+  
+  # Get bounding box of the province
+  bbox <- st_bbox(selected_region)
+  lon_min <- bbox["xmin"]
+  lon_max <- bbox["xmax"]
+  lat_min <- bbox["ymin"]
+  lat_max <- bbox["ymax"]
+  
+  # Extract longitude & latitude for polygon
+  longitude <- st_coordinates(selected_region)[,1]
+  latitude  <- st_coordinates(selected_region)[,2]
+  
+} else {
+  # Manually set bounding box
+  lon_min <- -128.0
+  lon_max <- -124.0
+  lat_min <-  42.0
+  lat_max <-  46.0
+  
+  longitude <- c(lon_min, lon_max, lon_max, lon_min, lon_min)
+  latitude  <- c(lat_min, lat_min, lat_max, lat_max, lat_min)
+}
+
+# Print bounding box
+print(paste("Bounding Box:", lon_min, lon_max, lat_min, lat_max))
+
+```
+
+## Select Satellite Dataset from ERDDAP
+
+We will be using the MODIS-AQUA - VIIRS-SNPP Correlations dataset from the West Coast Node ERDDAP Server.
+The dataset ID is: **correlations_modis_snpp_monthly_9km**.
+We will use the info function from the **rerddap** package to first obtain information about the dataset of interest, then we will import the data.
+
+```{r sat-data, message=FALSE, warning=FALSE}
+# Set ERDDAP URL
+erddap_url = "http://localhost:8080/erddap"
+
+# Get dataset info
+dataInfo <- rerddap::info('correlations_modis_snpp_monthly_9km', url=erddap_url)  
+print(dataInfo$alldata$time)
+
+```
+
+## Extract Data from ERDDAP
+
+Using the **rxtracto_3D function** for the bounding box, we will import the satellite data from erddap.
+
+Using the **rxtractogon function** for the province, we will import the satellite data from erddap.
+The rxtractogon function takes the variable(s) of interest and the coordinates as input.
+The rxtractogon function automatically extracts data from the satellite dataset and masks out any data outside the polygon boundary.
+
+We are interested in correlations, so we set the parameter to corr because that's what it's called in the dataset.
+
+There is only one timestamp in the dataset, so that's what we use.
+
+Above, we set our xcoords (longitude) and ycoords (latitude) so we will use those ranges here.
+
+```{r extract-data, message=FALSE, warning=FALSE}
+# Set extraction parameters
+parameter <- 'corr'
+trends_time <- c("2018-01-16T12:00:00Z")
+
+# ✅ Extract **full bounding box data** (like Python's unmasked bbox plot)
+bbox_data <- rxtracto_3D(
+  dataInfo,
+  parameter = parameter,
+  xcoord = c(lon_min, lon_max),
+  ycoord = c(lat_min, lat_max),
+  tcoord = c("2018-01-16 12:00:00", "2018-01-16 12:00:00")
+)
+
+#List the returned data
+str(bbox_data)
+
+# ✅ Extract **province-masked data** (like Python's masked province plot)
+prov_data <- rxtractogon(
+  dataInfo,
+  parameter = parameter,
+  xcoord = longitude,
+  ycoord = latitude,
+  tcoord = trends_time
+)
+
+#List the returned data
+str(prov_data)
+
+```
+
+## Visualize the Correlations
+
+Use the **plotBBox function** in the **rerddapXtracto** package to plot the data.
+
+```{r bbox-plot, message=FALSE, warning=FALSE}
+custom_colors <- colorRampPalette(c("red", "white", "blue"))(100)
+
+plotBBox(bbox_data,
+         plotColor = custom_colors,
+         maxpixels = 1000000,
+         name = 'Correlation coefficients'
+)
+
+```
+
+```{r province-plot, message=FALSE, warning=FALSE}
+plotBBox(prov_data,
+         plotColor = custom_colors,
+         maxpixels = 1000000,
+         name = 'Correlation coefficients'
+)
+
+```
